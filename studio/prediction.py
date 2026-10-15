@@ -4,9 +4,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from .inference import SegmentationPredictor, ResultGate
+from .file_dialogs import choose_file, choose_directory
 from .project import IMAGE_EXTENSIONS, atomic_bytes, atomic_json, image_bytes, read_image
 from .qt import QtCore, QtWidgets, Signal
-from .widgets import ImageView, button, card, label, page_header, scroll_panel
+from .widgets import ImageView, button, card, label, page_header, scroll_panel, device_selector, help_label, unit_field
 
 
 class PredictionWorker(QtCore.QThread):
@@ -79,7 +80,7 @@ class PredictionPage(QtWidgets.QWidget):
         box.addWidget(self.model)
         box.addWidget(button('모델 파일 선택', self.browse_model))
         self.source_mode = QtWidgets.QComboBox()
-        self.source_mode.addItems(['이미지', '이미지 폴더', 'ZMQ 스트림'])
+        self.source_mode.addItems(['이미지', '이미지 폴더', '수집 화면 입력'])
         box.addWidget(self.source_mode)
         self.source = QtWidgets.QLineEdit()
         self.source.setPlaceholderText('추론할 이미지 또는 폴더')
@@ -98,11 +99,11 @@ class PredictionPage(QtWidgets.QWidget):
         self.imgsz.setRange(32, 4096)
         self.imgsz.setSingleStep(32)
         self.imgsz.setValue(864)
-        self.device = QtWidgets.QLineEdit('cpu')
+        self.device = device_selector()
         form.addRow('신뢰도', self.conf)
         form.addRow('IoU', self.iou)
-        form.addRow('입력 크기', self.imgsz)
-        form.addRow('Device', self.device)
+        form.addRow('입력 크기', unit_field(self.imgsz, 'px'))
+        form.addRow(help_label('실행 장치', self.device.toolTip() + '\nONNX의 GPU 실행에는 CUDA 지원 ONNX Runtime이 필요합니다.'), self.device)
         box.addLayout(form)
         box.addWidget(label('고정 크기 ONNX는 내보낼 때 지정한 입력 크기를 사용합니다.', 'subtitle'))
         self.start_button = button('모델 로드 / 추론 시작', self.start, True)
@@ -131,11 +132,12 @@ class PredictionPage(QtWidgets.QWidget):
         self.timer.timeout.connect(self.pump)
         self.timer.start(80)
         self.pending_restart = False
-        for field in (self.model, self.source, self.device):
+        for field in (self.model, self.source):
             field.textChanged.connect(self.settings_changed)
         for field in (self.conf, self.iou, self.imgsz):
             field.valueChanged.connect(self.settings_changed)
         self.source_mode.currentIndexChanged.connect(self.settings_changed)
+        self.device.currentIndexChanged.connect(self.settings_changed)
 
     def settings_changed(self):
         had_result = self.last_result is not None or self.gate.active
@@ -153,7 +155,7 @@ class PredictionPage(QtWidgets.QWidget):
         self.view.set_frame(None)
 
     def browse_model(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '세그먼테이션 모델', '', 'Models (*.pt *.onnx)')
+        path = choose_file(self, '세그먼테이션 모델', 'Models (*.pt *.onnx)', 'model', self.project, self.model.text())
         if path:
             self.model.setText(path)
             if self.busy():
@@ -162,11 +164,12 @@ class PredictionPage(QtWidgets.QWidget):
 
     def browse_source(self):
         if self.source_mode.currentIndex() == 1:
-            path = QtWidgets.QFileDialog.getExistingDirectory(self, '이미지 폴더')
+            path = choose_directory(self, '이미지 폴더', 'image', self.project, self.source.text())
         elif self.source_mode.currentIndex() == 0:
-            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '이미지', '', 'Images (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff)')
+            path = choose_file(self, '이미지', 'Images (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff)',
+                               'image', self.project, self.source.text())
         else:
-            self.notice.setText('수집 화면에서 연결한 ZMQ 스트림을 공유합니다.')
+            self.notice.setText('수집 화면의 ZMQ 또는 이미지·동영상 입력을 공유합니다.')
             return
         if path:
             self.source.setText(path)
@@ -186,7 +189,7 @@ class PredictionPage(QtWidgets.QWidget):
             self.last_sequence = None
             if self.source_mode.currentIndex() == 2:
                 if self.capture.latest()[0] is None:
-                    raise ValueError('수집 화면에서 스트림을 연결하고 프레임을 수신하세요.')
+                    raise ValueError('수집 화면에서 ZMQ 연결 또는 이미지·동영상 파일을 준비하세요.')
             else:
                 source = Path(self.source.text().strip())
                 if self.source_mode.currentIndex() == 1 and source.is_dir():
@@ -200,7 +203,7 @@ class PredictionPage(QtWidgets.QWidget):
             self.objects.clear()
             generation = self.gate.start()
             config = dict(path=str(path), conf=self.conf.value(), iou=self.iou.value(),
-                          device=self.device.text().strip() or 'cpu', imgsz=self.imgsz.value())
+                          device=self.device.currentData() or None, imgsz=self.imgsz.value())
             self.run_config = config.copy()
             self.worker = PredictionWorker(generation, config, self)
             self.worker.loaded.connect(self.on_loaded)
@@ -244,13 +247,15 @@ class PredictionPage(QtWidgets.QWidget):
         frame, sequence, received = self.capture.latest()
         if frame is not None and sequence != self.last_sequence and time.monotonic() - received < 1.5:
             self.last_sequence = sequence
-            self.worker.submit(frame, 'zmq')
+            self.worker.submit(frame, self.capture.source_name())
 
     def on_result(self, generation, value):
         if not self.gate.accepts(generation):
             return
         result, source = value
         if self.files and source != self.requested_source:
+            return
+        if not self.files and source != self.capture.source_name():
             return
         self.last_result, self.last_source = result, source
         self.result_config = self.run_config.copy() if self.run_config else {}

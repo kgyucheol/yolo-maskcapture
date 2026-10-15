@@ -12,3 +12,7 @@ projects/
 *.onnx
 install.log
 *.orig
+*.log
+.env
+.env.*
+/용기공급/

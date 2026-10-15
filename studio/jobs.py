@@ -1,13 +1,21 @@
 """Worker process CLI. Heavy ML imports happen only inside a requested job."""
 import argparse
 import json
+import math
 import signal
 import sys
 import traceback
+import time
 from pathlib import Path
 from uuid import uuid4
 
 from .project import atomic_json
+
+
+OPTIMIZERS = ('auto', 'SGD', 'Adam', 'AdamW', 'NAdam', 'RAdam', 'RMSProp')
+TRAIN_DEFAULTS = dict(patience=100, optimizer='auto', lr0=.01, lrf=.01, momentum=.937,
+                      weight_decay=.0005, warmup_epochs=3., cos_lr=False, amp=True,
+                      seed=0, workers=0, mask_ratio=4, overlap_mask=True)
 
 
 def validate_train_config(config):
@@ -21,6 +29,24 @@ def validate_train_config(config):
             raise ValueError('epoch는 1 이상, batch는 1 이상 또는 자동(-1)이어야 합니다.')
         if not Path(config.get('data', '')).is_file():
             raise ValueError('생성된 데이터셋의 data.yaml을 선택하세요.')
+        settings = {**TRAIN_DEFAULTS, **config}
+        for name, minimum, maximum in (('patience', 0, 100000), ('workers', 0, 32),
+                                      ('seed', 0, 2147483647), ('mask_ratio', 1, 16)):
+            value = settings[name]
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ValueError(f'{name}: {minimum}~{maximum} 범위의 정수를 입력하세요.')
+        for name, minimum, maximum in (('lr0', .000001, 1), ('lrf', 0, 1), ('momentum', 0, .999),
+                                      ('weight_decay', 0, 1), ('warmup_epochs', 0, 1000)):
+            value = settings[name]
+            if type(value) not in (int, float) or not math.isfinite(value) or not minimum <= value <= maximum:
+                raise ValueError(f'{name}: {minimum}~{maximum} 범위의 숫자를 입력하세요.')
+        if settings['optimizer'] not in OPTIMIZERS:
+            raise ValueError('목록에서 optimizer를 선택하세요.')
+        if settings['optimizer'] == 'SGD' and settings['momentum'] <= 0:
+            raise ValueError('SGD의 모멘텀은 0보다 커야 합니다.')
+        for name in ('cos_lr', 'amp', 'overlap_mask'):
+            if type(settings[name]) is not bool:
+                raise ValueError(f'{name}: 켜짐/꺼짐 값이 필요합니다.')
     elif not Path(config.get('model', '')).is_file():
         raise ValueError('내보낼 PT 파일을 선택하세요.')
 
@@ -35,14 +61,20 @@ def run_job(config):
     if model.task != 'segment':
         raise ValueError('세그먼테이션 모델을 사용하세요. 기본 모델: yolo11s-seg.pt')
     if config['mode'] == 'train':
+        epoch_started = [None]
+        def on_epoch_start(trainer):
+            epoch_started[0] = time.monotonic()
         def on_epoch(trainer):
             print('STUDIO_PROGRESS ' + json.dumps(dict(epoch=int(trainer.epoch) + 1,
-                epochs=int(trainer.epochs))), flush=True)
+                epochs=int(trainer.epochs), epoch_seconds=(time.monotonic() - epoch_started[0]
+                    if epoch_started[0] is not None else None))), flush=True)
+        model.add_callback('on_train_epoch_start', on_epoch_start)
         model.add_callback('on_fit_epoch_end', on_epoch)
         model.train(data=config['data'], epochs=int(config['epochs']), imgsz=config['imgsz'],
                     batch=int(config['batch']), device=config.get('device') or None,
                     rect=bool(config.get('rect', False)), project=config['project'],
-                    name=config.get('name', 'train_' + uuid4().hex[:8]), exist_ok=False, workers=0)
+                    name=config.get('name', 'train_' + uuid4().hex[:8]), exist_ok=False,
+                    **{key: config.get(key, value) for key, value in TRAIN_DEFAULTS.items()})
         best = Path(model.trainer.best)
         if not best.is_file():
             raise RuntimeError('학습은 종료되었지만 best.pt를 찾을 수 없습니다.')

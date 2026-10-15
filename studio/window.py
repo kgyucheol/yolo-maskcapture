@@ -8,6 +8,7 @@ from .qt import QtCore, QtWidgets, Qt
 from .theme import STYLESHEET
 from .training import DatasetPage, TrainingPage
 from .widgets import button, label
+from .file_dialogs import choose_file, choose_directory
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -97,7 +98,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def new_project(self):
         if not self.prepare_switch():
             return
-        path = QtWidgets.QFileDialog.getExistingDirectory(self, '새 프로젝트용 빈 폴더 선택')
+        path = choose_directory(self, '새 프로젝트용 빈 폴더 선택', 'project', self.project)
         if path:
             try:
                 self.set_project(Project.create(path))
@@ -107,7 +108,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def open_project(self):
         if not self.prepare_switch():
             return
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '프로젝트 열기', '', 'Studio project (project.json)')
+        path = choose_file(self, '프로젝트 열기', 'Studio project (project.json)', 'project', self.project)
         if path:
             try:
                 self.set_project(Project.open(path))
@@ -154,7 +155,10 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, '사용 방법과 왼손 단축키',
             '1. 수집: 스트림 연결 후 Space 촬영 / Ctrl+Space 자동 촬영\n'
             '2. 라벨링: 클래스 이름을 태그로 등록\n'
+            '   T AI 클릭: 좌클릭 포함 / 우클릭·Shift+좌클릭 제외\n'
+            '   Z AI 점 취소 / Shift+Z 다시 실행 / C 초안 취소\n'
             '   W 폴리곤 / E 사각형 / R 브러시 / Shift+R 지우개\n'
+            '   AI 마스크는 F 확정 후 R·Shift+R로 경계 직접 보정\n'
             '   F 도형 완료 → 1–9 숫자로 선택 객체 태그 지정\n'
             '   Q 선택·꼭짓점 이동 / X 객체 삭제 / C 그리기 취소\n'
             '   Z 실행 취소 / Shift+Z 다시 실행 / A·D 이미지 이동\n'
@@ -184,7 +188,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.training.stop()
             self.prediction.stop()
             self.capture.stop()
-        if self.dataset.busy() or self.prediction.busy() or self.training.busy() or (self.capture.worker and self.capture.worker.isRunning()):
+            self.labeling.stop_sam()
+        if self.labeling.sam_busy() or self.dataset.busy() or self.prediction.busy() or self.training.busy() or (self.capture.worker and self.capture.worker.isRunning()):
             self.statusBar().showMessage('작업을 정리하는 중입니다. 완료 후 종료합니다…')
             event.ignore()
             QtCore.QTimer.singleShot(250, self.close)

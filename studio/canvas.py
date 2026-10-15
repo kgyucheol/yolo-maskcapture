@@ -5,6 +5,7 @@ import numpy as np
 from .document import AnnotationDocument
 from .qt import QtCore, QtGui, QtWidgets, Qt, Signal, event_pos, qimage
 from .theme import class_color
+from .widgets import Toast
 
 
 class MaskCanvas(QtWidgets.QWidget):
@@ -13,6 +14,8 @@ class MaskCanvas(QtWidgets.QWidget):
     message = Signal(str)
     command = Signal(str)
     toolChanged = Signal(str)
+    samRequested = Signal(int, object, object)
+    samCleared = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -21,6 +24,13 @@ class MaskCanvas(QtWidgets.QWidget):
         self.setMinimumSize(300, 240)
         self.doc = None
         self.image = None
+        self.frame = None
+        self.image_revision = 0
+        self.sam_revision = 0
+        self.sam_points = []
+        self.sam_labels = []
+        self.sam_preview = None
+        self.sam_redo = []
         self.class_names = []
         self.tool = 'polygon'
         self.points = []
@@ -37,12 +47,15 @@ class MaskCanvas(QtWidgets.QWidget):
         self.last_point = None
         self.vertex = None
         self.vertex_points = None
+        self.zoom_toast = Toast(self)
 
     @property
     def pending(self):
-        return bool(self.points or self.rect_start is not None or self.stroke is not None)
+        return bool(self.sam_points or self.points or self.rect_start is not None or self.stroke is not None)
 
     def set_image(self, frame, objects=None):
+        self.frame = frame.copy()
+        self.image_revision += 1
         self.image = qimage(frame)
         self.doc = AnnotationDocument(frame.shape[:2], objects)
         self.cancel()
@@ -51,11 +64,16 @@ class MaskCanvas(QtWidgets.QWidget):
     def clear_image(self):
         self.doc = None
         self.image = None
+        self.frame = None
+        self.image_revision += 1
         self.cursor_point = None
         self.cancel()
+        self.zoom_toast.hide()
         self.selectionChanged.emit()
 
     def fit(self):
+        self.pan_start = None
+        self.space = False
         if self.image:
             self.scale = max(0.01, min((self.width() - 40) / self.image.width(),
                                      (self.height() - 40) / self.image.height()))
@@ -63,15 +81,27 @@ class MaskCanvas(QtWidgets.QWidget):
                                          (self.height() - self.image.height() * self.scale) / 2)
         self.update()
 
+    def reset_view(self):
+        self.fit()
+        if self.image:
+            self.show_zoom()
+        self.setFocus()
+
+    def show_zoom(self):
+        self.zoom_toast.flash(f'{self.scale * 100:.0f}% · 원본 픽셀 기준', ms=1100)
+
     def resizeEvent(self, event):
         self.fit()
+        self.zoom_toast.place()
 
     def set_tool(self, tool):
+        self.setFocus()
         if self.pending:
             self.message.emit('먼저 F로 도형을 완료하거나 C로 취소하세요.')
+            self.toolChanged.emit(self.tool)
             return
         self.tool = tool
-        if tool in ('polygon', 'rectangle') and self.doc:
+        if tool in ('polygon', 'rectangle', 'sam') and self.doc:
             self.doc.selected = None
             self.selectionChanged.emit()
         self.toolChanged.emit(tool)
@@ -79,6 +109,7 @@ class MaskCanvas(QtWidgets.QWidget):
         self.update()
 
     def new_object(self):
+        self.setFocus()
         if self.pending:
             self.message.emit('먼저 F 또는 C로 현재 도형을 정리하세요.')
             return
@@ -89,10 +120,53 @@ class MaskCanvas(QtWidgets.QWidget):
         self.update()
 
     def cancel(self):
+        self.sam_revision += 1
+        self.sam_points, self.sam_labels, self.sam_redo = [], [], []
+        self.sam_preview = None
+        self.samCleared.emit()
         self.points = []
         self.rect_start = self.rect_end = self.stroke = None
         self.vertex = self.vertex_points = None
         self.update()
+
+    def _request_sam(self):
+        self.sam_revision += 1
+        self.sam_preview = None
+        if self.sam_points:
+            self.message.emit('AI 계산 중… · 좌클릭 포함 / 우클릭 제외 · C 취소')
+            self.samRequested.emit(self.sam_revision, list(self.sam_points), list(self.sam_labels))
+        else:
+            self.samCleared.emit()
+        self.update()
+
+    def accept_sam(self, revision, mask):
+        if revision != self.sam_revision or not self.sam_points or not self.doc:
+            return False
+        mask = np.asarray(mask)
+        if mask.shape != self.doc.shape or not np.isfinite(mask).all() or not np.any(mask > 0):
+            self.fail_sam(revision, '마스크가 비어 있거나 크기가 맞지 않습니다. 포함 점을 추가하거나 C로 다시 시작하세요.')
+            return False
+        self.sam_preview = np.where(mask > 0, 255, 0).astype(np.uint8)
+        self.message.emit('AI 미리보기 · 좌클릭 추가 / 우클릭 제외 · F 확정 → 숫자 태그 · Z 점 취소')
+        self.update()
+        return True
+
+    def fail_sam(self, revision, error):
+        if revision == self.sam_revision and self.sam_points:
+            self.sam_preview = None
+            self.message.emit('AI 마스크 실패: ' + error)
+            self.update()
+
+    def undo_sam(self, redo=False):
+        if redo and self.sam_redo:
+            point, label = self.sam_redo.pop()
+            self.sam_points.append(point)
+            self.sam_labels.append(label)
+        elif not redo and self.sam_points:
+            self.sam_redo.append((self.sam_points.pop(), self.sam_labels.pop()))
+        else:
+            return
+        self._request_sam()
 
     def _point(self, pos):
         return ((pos.x() - self.offset.x()) / self.scale,
@@ -112,6 +186,15 @@ class MaskCanvas(QtWidgets.QWidget):
 
     def finish(self):
         if not self.doc:
+            return
+        if self.sam_points:
+            if self.sam_preview is None:
+                self.message.emit('최신 AI 마스크가 준비된 뒤 F로 확정하세요. 오류가 있으면 점을 추가하거나 C로 취소하세요.')
+                return
+            self.doc.add_mask(self.sam_preview)
+            self.cancel()
+            self._notify()
+            self.message.emit('AI 마스크 확정 · 1–9 태그 · R 브러시 / Shift+R 지우개로 경계 보정 · T 다음 객체')
             return
         mask = np.zeros(self.doc.shape, np.uint8)
         points = self.points
@@ -148,12 +231,38 @@ class MaskCanvas(QtWidgets.QWidget):
         else:
             self.message.emit('객체를 선택하고 등록된 태그 번호를 누르세요.')
 
+    def mask_label_rect(self, obj, text):
+        """Anchor each badge inside an actual visible mask region, including concave masks."""
+        height, width = obj.mask.shape
+        x0 = max(0, int(np.floor(-self.offset.x() / self.scale)))
+        y0 = max(0, int(np.floor(-self.offset.y() / self.scale)))
+        x1 = min(width, int(np.ceil((self.width() - self.offset.x()) / self.scale)))
+        y1 = min(height, int(np.ceil((self.height() - self.offset.y()) / self.scale)))
+        if x1 <= x0 or y1 <= y0:
+            return QtCore.QRectF()
+        visible = obj.mask[y0:y1, x0:x1]
+        if not np.any(visible):
+            return QtCore.QRectF()
+        padded = cv2.copyMakeBorder(visible, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+        distance = cv2.distanceTransform(padded, cv2.DIST_L2, 3)
+        _, _, _, (x, y) = cv2.minMaxLoc(distance)
+        anchor = self.offset + QtCore.QPointF((x + x0 - 1) * self.scale, (y + y0 - 1) * self.scale)
+        left, top = max(0., self.offset.x()), max(0., self.offset.y())
+        right = min(float(self.width()), self.offset.x() + width * self.scale)
+        bottom = min(float(self.height()), self.offset.y() + height * self.scale)
+        metrics = self.fontMetrics()
+        badge_width = min(metrics.horizontalAdvance(text) + 14, right - left)
+        badge_height = min(metrics.height() + 8, bottom - top)
+        bx = max(left, min(anchor.x() - badge_width / 2, right - badge_width))
+        by = max(top, min(anchor.y() - badge_height / 2, bottom - badge_height))
+        return QtCore.QRectF(bx, by, badge_width, badge_height)
+
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
         p.fillRect(self.rect(), QtGui.QColor('#0a101a'))
         if self.image is None:
             p.setPen(QtGui.QColor('#8595ac'))
-            p.drawText(self.rect(), Qt.AlignCenter, '이미지를 가져오거나 ZMQ에서 수집하세요\n\nW 폴리곤   ·   E 사각형   ·   R 브러시')
+            p.drawText(self.rect(), Qt.AlignCenter, '이미지를 가져오거나 ZMQ에서 수집하세요\n\nT AI 클릭   ·   W 폴리곤   ·   E 사각형   ·   R 브러시')
             return
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         p.translate(self.offset)
@@ -175,15 +284,36 @@ class MaskCanvas(QtWidgets.QWidget):
                     p.setBrush(color)
                     for x, y in (self.vertex_points if self.vertex_points is not None else obj.points):
                         p.drawEllipse(QtCore.QPointF(x, y), 4 / self.scale, 4 / self.scale)
-                ys, xs = np.where(obj.mask > 0)
-                if len(xs):
-                    text = '태그 미지정' if obj.class_id is None else f'{obj.class_id + 1} {self.class_names[obj.class_id]}'
+                text = '태그 미지정' if obj.class_id is None else f'{obj.class_id + 1} {self.class_names[obj.class_id]}'
+                badge = self.mask_label_rect(obj, text)
+                if not badge.isEmpty():
                     p.save()
-                    p.translate(float(xs.min()), max(14 / self.scale, float(ys.min())))
-                    p.scale(1 / self.scale, 1 / self.scale)
-                    p.setPen(color)
-                    p.drawText(QtCore.QPointF(4, -5), text)
+                    p.resetTransform()
+                    p.setPen(QtGui.QPen(color, 1))
+                    p.setBrush(QtGui.QColor(10, 20, 30, 225))
+                    p.drawRoundedRect(badge, 5, 5)
+                    caption = self.fontMetrics().elidedText(text, Qt.ElideRight, max(0, int(badge.width()) - 10))
+                    p.drawText(badge, Qt.AlignCenter, caption)
                     p.restore()
+        if self.sam_preview is not None:
+            rgba = np.zeros((*self.doc.shape, 4), np.uint8)
+            rgba[self.sam_preview > 0] = [80, 230, 190, 125]
+            p.drawImage(QtCore.QPointF(0, 0), QtGui.QImage(rgba.data, rgba.shape[1], rgba.shape[0],
+                        rgba.strides[0], QtGui.QImage.Format_RGBA8888))
+            p.setPen(QtGui.QPen(QtGui.QColor('#65f2d1'), 2 / self.scale, Qt.DashLine))
+            p.setBrush(Qt.NoBrush)
+            contours, _ = cv2.findContours(self.sam_preview, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(float(x), float(y)) for x, y in contour[:, 0]]))
+        for (x, y), foreground in zip(self.sam_points, self.sam_labels):
+            color = QtGui.QColor('#65f2d1' if foreground else '#ff7b8d')
+            p.setPen(QtGui.QPen(QtGui.QColor('#101925'), 2 / self.scale))
+            p.setBrush(color)
+            p.drawEllipse(QtCore.QPointF(x, y), 7 / self.scale, 7 / self.scale)
+            p.setPen(QtGui.QPen(QtGui.QColor('#101925'), 1.7 / self.scale))
+            p.drawLine(QtCore.QPointF(x - 3 / self.scale, y), QtCore.QPointF(x + 3 / self.scale, y))
+            if foreground:
+                p.drawLine(QtCore.QPointF(x, y - 3 / self.scale), QtCore.QPointF(x, y + 3 / self.scale))
         p.setPen(QtGui.QPen(QtGui.QColor('#65f2d1'), 2 / self.scale))
         p.setBrush(Qt.NoBrush)
         if self.points:
@@ -209,6 +339,16 @@ class MaskCanvas(QtWidgets.QWidget):
             self.pan_start = pos
             return
         point = self._point(pos)
+        if self.tool == 'sam' and self._inside(point) and event.button() in (Qt.LeftButton, Qt.RightButton):
+            foreground = int(event.button() == Qt.LeftButton and not event.modifiers() & Qt.ShiftModifier)
+            if not self.sam_points and not foreground:
+                self.message.emit('먼저 물체 안쪽을 좌클릭해 포함 점을 지정하세요.')
+                return
+            self.sam_points.append(self._clamp(point))
+            self.sam_labels.append(foreground)
+            self.sam_redo.clear()
+            self._request_sam()
+            return
         if event.button() != Qt.LeftButton or not self._inside(point):
             return
         point = self._clamp(point)
@@ -281,14 +421,19 @@ class MaskCanvas(QtWidgets.QWidget):
         if not self.doc:
             return
         delta = event.angleDelta().y()
+        if not delta:
+            return
         if event.modifiers() & Qt.ControlModifier:
             self.brush_size = max(2, min(300, self.brush_size + (2 if delta > 0 else -2)))
             self.message.emit(f'브러시 크기: {self.brush_size}px')
         else:
             pos = event_pos(event)
-            before = self._point(pos)
+            before = (pos - self.offset) / self.scale
+            previous = self.scale
             self.scale = float(np.clip(self.scale * (1.15 if delta > 0 else 1 / 1.15), 0.03, 30))
-            self.offset = pos - QtCore.QPointF(before[0] * self.scale, before[1] * self.scale)
+            self.offset = pos - before * self.scale
+            if previous != self.scale:
+                self.show_zoom()
         self.update()
 
     def event(self, event):
@@ -315,9 +460,9 @@ class MaskCanvas(QtWidgets.QWidget):
         elif key in (Qt.Key_Tab, Qt.Key_Backtab) and self.doc and self.class_names:
             cid = self.doc.current.class_id if self.doc.current and self.doc.current.class_id is not None else -1
             self.assign_tag((cid + (-1 if shift or key == Qt.Key_Backtab else 1)) % len(self.class_names))
-        elif key in (Qt.Key_Q, Qt.Key_W, Qt.Key_E, Qt.Key_R):
+        elif key in (Qt.Key_Q, Qt.Key_W, Qt.Key_E, Qt.Key_R, Qt.Key_T):
             self.set_tool({Qt.Key_Q: 'select', Qt.Key_W: 'polygon', Qt.Key_E: 'rectangle',
-                           Qt.Key_R: 'eraser' if shift else 'brush'}[key])
+                           Qt.Key_R: 'eraser' if shift else 'brush', Qt.Key_T: 'sam'}[key])
         elif key == Qt.Key_V:
             self.overlay = not self.overlay
             self.update()
@@ -325,7 +470,9 @@ class MaskCanvas(QtWidgets.QWidget):
             self.doc.delete_selected()
             self._notify()
         elif self.doc and key == Qt.Key_Z:
-            if self.points and not shift:
+            if self.sam_points or (self.tool == 'sam' and self.sam_redo):
+                self.undo_sam(shift)
+            elif self.points and not shift:
                 self.points.pop()
                 self.update()
             elif not self.pending:

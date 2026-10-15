@@ -4,6 +4,8 @@ import time
 from datetime import datetime, timezone
 
 from .qt import QtCore, QtWidgets, Qt, Signal
+from .media import FileMediaSource, MEDIA_FILTER, media_time
+from .file_dialogs import choose_file
 from .widgets import ImageView, button, card, label, page_header, scroll_panel
 
 
@@ -85,6 +87,17 @@ class CaptureWorker(QtCore.QThread):
                 source.close()
 
 
+INTERVAL_PRESETS = (0.5, 1, 2, 5, 10)
+
+
+class IntervalSpin(QtWidgets.QDoubleSpinBox):
+    """클릭하거나 탭으로 들어오면 값 전체가 선택되어 바로 덮어쓸 수 있는 간격 입력 칸."""
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        QtCore.QTimer.singleShot(0, self.selectAll)
+
+
 class CapturePage(QtWidgets.QWidget):
     imagesAdded = Signal()
 
@@ -92,17 +105,26 @@ class CapturePage(QtWidgets.QWidget):
         super().__init__(parent)
         self.project = None
         self.worker = None
+        self.media = None
+        self.source_generation = 0
         self.policy = CapturePolicy()
         self.displayed_sequence = 0
         self.setFocusPolicy(Qt.StrongFocus)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(page_header('데이터 수집', '실시간 영상을 확인하고 필요한 순간을 저장하세요. 원본 해상도를 그대로 보존합니다.'))
+        layout.addWidget(page_header('데이터 수집', 'ZMQ 스트림 또는 이미지·동영상 파일을 확인하고 필요한 순간을 원본 해상도로 저장하세요.'))
         row = QtWidgets.QHBoxLayout()
         self.view = ImageView('ZMQ 영상이 여기에 표시됩니다\n\n192.168.123.164:55555')
         row.addWidget(self.view, 1)
-        frame, box = card('스트림 연결')
+        frame, box = card('입력과 촬영')
         frame.setMaximumWidth(330)
+        self.source_mode = QtWidgets.QComboBox()
+        self.source_mode.addItems(['ZMQ 스트림', '이미지 / 동영상 파일'])
+        box.addWidget(self.source_mode)
+        self.source_stack = QtWidgets.QStackedWidget()
+        stream_controls = QtWidgets.QWidget()
+        stream_box = QtWidgets.QVBoxLayout(stream_controls)
+        stream_box.setContentsMargins(0, 0, 0, 0)
         form = QtWidgets.QFormLayout()
         self.host = QtWidgets.QLineEdit('192.168.123.164')
         self.port = QtWidgets.QSpinBox()
@@ -115,27 +137,75 @@ class CapturePage(QtWidgets.QWidget):
         form.addRow('포트', self.port)
         form.addRow('수신 방식', self.mode)
         form.addRow('', self.bind)
-        box.addLayout(form)
+        stream_box.addLayout(form)
         self.connect_button = button('스트림 연결', self.toggle_connection, True)
-        box.addWidget(self.connect_button)
-        box.addWidget(label('연결 상태', 'section'))
+        stream_box.addWidget(self.connect_button)
+        stream_box.addStretch()
+        self.source_stack.addWidget(stream_controls)
+        file_controls = QtWidgets.QWidget()
+        file_box = QtWidgets.QVBoxLayout(file_controls)
+        file_box.setContentsMargins(0, 0, 0, 0)
+        self.file_path = QtWidgets.QLineEdit()
+        self.file_path.setReadOnly(True)
+        self.file_path.setPlaceholderText('PNG, JPG, MP4, AVI, MOV…')
+        file_box.addWidget(self.file_path)
+        file_box.addWidget(button('이미지 / 동영상 파일 열기', self.browse_media, True))
+        playback = QtWidgets.QHBoxLayout()
+        self.play_button = button('재생', self.toggle_playback)
+        self.rewind_button = button('처음으로', lambda: self.seek_media(0))
+        playback.addWidget(self.play_button)
+        playback.addWidget(self.rewind_button)
+        file_box.addLayout(playback)
+        self.seek_slider = QtWidgets.QSlider(Qt.Horizontal)
+        self.seek_slider.setRange(0, 0)
+        self.seek_slider.valueChanged.connect(self.seek_media)
+        file_box.addWidget(self.seek_slider)
+        self.media_position = label('파일을 선택하세요.', 'subtitle')
+        file_box.addWidget(self.media_position)
+        file_box.addStretch()
+        self.source_stack.addWidget(file_controls)
+        box.addWidget(self.source_stack)
+        self.update_playback()
+        self.source_mode.currentIndexChanged.connect(self.switch_source)
+        box.addWidget(label('입력 상태', 'section'))
         self.connection = label('연결되지 않음', 'notice')
         box.addWidget(self.connection)
         box.addWidget(label('자동 촬영', 'section'))
-        self.interval = QtWidgets.QDoubleSpinBox()
+        self.interval = IntervalSpin()
         self.interval.setRange(0.1, 3600)
         self.interval.setDecimals(1)
+        self.interval.setSingleStep(0.5)
+        self.interval.setKeyboardTracking(False)
+        self.interval.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.interval.setFixedWidth(96)
         self.interval.setValue(1)
-        self.interval.setSuffix(' 초마다 1장')
+        self.interval.setToolTip('숫자를 입력하고 Enter. 0.1 ~ 3600초')
         self.interval.valueChanged.connect(self.policy.set_interval)
-        box.addWidget(self.interval)
+        self.interval.valueChanged.connect(self.show_interval)
+        self.interval.lineEdit().returnPressed.connect(self.setFocus)
+        self.interval_text = label('', 'subtitle')
+        interval_row = QtWidgets.QHBoxLayout()
+        interval_row.addWidget(self.interval)
+        interval_row.addWidget(self.interval_text, 1)
+        box.addLayout(interval_row)
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_row.setSpacing(5)
+        self.preset_buttons = {}
+        for seconds in INTERVAL_PRESETS:
+            chip = button(f'{seconds:g}초', lambda checked=False, value=seconds: self.set_interval_preset(value))
+            chip.setObjectName('chip')
+            chip.setCheckable(True)
+            self.preset_buttons[seconds] = chip
+            preset_row.addWidget(chip)
+        box.addLayout(preset_row)
+        self.show_interval(self.interval.value())
         self.auto_button = button('Ctrl+Space  자동 촬영', self.toggle_auto)
         self.auto_button.setCheckable(True)
         box.addWidget(self.auto_button)
         box.addWidget(button('Space  지금 한 장 촬영', self.capture_one, True))
         self.count = label('이번 세션 0장', 'badge')
         box.addWidget(self.count)
-        box.addWidget(label('SUB: PUB 송신기에 연결\nPULL: PUSH 송신기에 연결\nREQ: REP 송신기에 요청\n\nJPEG/PNG 바이트 또는\n마지막 파트가 이미지인 multipart', 'subtitle'))
+        box.addWidget(label('이미지: 파일을 열고 한 장 촬영\n동영상: 재생·일시정지·위치 이동 후 촬영\n자동 촬영은 재생 중인 새 프레임만 저장\n\nZMQ: JPEG/PNG 또는 multipart 지원', 'subtitle'))
         box.addStretch()
         row.addWidget(scroll_panel(frame, 330))
         layout.addLayout(row, 1)
@@ -146,7 +216,92 @@ class CapturePage(QtWidgets.QWidget):
         self.view.mousePressEvent = lambda event: self.setFocus()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.tick)
-        self.timer.start(40)
+        self.timer.start(15)
+
+    def switch_source(self, index):
+        self.stop()
+        self.source_stack.setCurrentIndex(index)
+        self.file_path.clear()
+        self.displayed_sequence = None
+        self.policy.last_sequence = None
+        self.policy.last_save = None
+        self.connection.setText('파일을 선택하세요.' if index else '연결되지 않음')
+        self.update_playback()
+
+    def browse_media(self):
+        path = choose_file(self, '이미지 또는 동영상 열기', MEDIA_FILTER, 'media', self.project, self.file_path.text())
+        if path:
+            self.open_media(path)
+
+    def open_media(self, path):
+        self.source_mode.setCurrentIndex(1)
+        self.stop()
+        self.displayed_sequence = None
+        self.policy.last_sequence = None
+        try:
+            self.media = FileMediaSource(path)
+            self.file_path.setText(str(self.media.path))
+            self.file_path.setToolTip(str(self.media.path))
+            self.view.set_frame(self.media.frame)
+            self.connection.setText(f'파일 준비됨 · {self.media.frame.shape[1]} × {self.media.frame.shape[0]}')
+            self.notice.setText('동영상은 재생한 뒤 자동 촬영하거나, 일시정지 후 한 장씩 촬영하세요.'
+                                if self.media.is_video else '이미지 준비됨 · Space 또는 촬영 버튼으로 프로젝트에 저장하세요.')
+            blocked = self.seek_slider.blockSignals(True)
+            self.seek_slider.setRange(0, max(0, self.media.total_frames - 1))
+            self.seek_slider.setValue(0)
+            self.seek_slider.blockSignals(blocked)
+            self.update_playback()
+            self.setFocus()
+            return True
+        except (ValueError, OSError) as exc:
+            self.media = None
+            self.file_path.clear()
+            self.notice.setText('파일 열기 실패: ' + str(exc))
+            self.update_playback()
+            return False
+
+    def toggle_playback(self):
+        if self.media and self.media.is_video:
+            if self.media.playing:
+                self.media.pause()
+                self.stop_auto()
+            else:
+                self.media.play()
+            self.update_playback()
+            self.setFocus()
+
+    def seek_media(self, index):
+        if self.media:
+            try:
+                self.stop_auto()
+                self.media.seek(index)
+                self.view.set_frame(self.media.frame)
+                self.update_playback()
+            except ValueError as exc:
+                self.notice.setText(str(exc))
+
+    def update_playback(self):
+        video = bool(self.media and self.media.is_video)
+        self.play_button.setEnabled(video)
+        self.rewind_button.setEnabled(video and self.media.total_frames > 0)
+        self.seek_slider.setEnabled(video and self.media.total_frames > 0)
+        self.play_button.setText('일시정지' if video and self.media.playing else '재생')
+        if self.media:
+            if video:
+                if not self.seek_slider.isSliderDown():
+                    blocked = self.seek_slider.blockSignals(True)
+                    self.seek_slider.setValue(self.media.frame_index)
+                    self.seek_slider.blockSignals(blocked)
+                self.media_position.setText(f'{media_time(self.media.frame_index / self.media.fps)} / '
+                    f'{media_time(self.media.total_frames / self.media.fps)} · {self.media.frame_index + 1} 프레임')
+            else:
+                self.media_position.setText('정지 이미지 · 원본 해상도로 촬영')
+        else:
+            self.media_position.setText('파일을 선택하세요.')
+
+    def stop_auto(self):
+        self.policy.automatic = False
+        self.auto_button.setChecked(False)
 
     def set_project(self, project):
         self.project = project
@@ -182,6 +337,7 @@ class CapturePage(QtWidgets.QWidget):
         self.displayed_sequence = 0
         self.policy.last_sequence = None
         self.worker = CaptureWorker(self.settings(), self)
+        self.source_generation += 1
         self.worker.status.connect(self.connection.setText)
         self.worker.finished.connect(self.on_finished)
         self.worker.start()
@@ -198,27 +354,51 @@ class CapturePage(QtWidgets.QWidget):
             widget.setEnabled(True)
 
     def stop(self):
+        self.source_generation += 1
         if self.worker:
             self.worker.requestInterruption()
             self.worker.wait(1000)
+        if self.media:
+            self.media.close()
+            self.media = None
         self.policy.automatic = False
         self.auto_button.setChecked(False)
         self.connection.setText('연결 해제됨')
         self.view.set_frame(None)
 
     def latest(self):
+        if self.source_mode.currentIndex() == 1:
+            if self.media:
+                frame, sequence, received = self.media.latest()
+                return frame, (self.source_generation, sequence), received
+            return None, 0, 0.
         if self.worker and self.worker.isRunning():
-            return self.worker.latest()
+            frame, sequence, received = self.worker.latest()
+            return frame, (self.source_generation, sequence), received
         return None, 0, 0.0
 
+    def source_name(self):
+        return str(self.media.path) if self.source_mode.currentIndex() == 1 and self.media else 'zmq'
+
     def toggle_auto(self):
-        if not self.project or not self.worker or not self.worker.isRunning():
+        ready = bool(self.media and self.media.is_video and self.media.playing) if self.source_mode.currentIndex() == 1 else bool(self.worker and self.worker.isRunning())
+        if not self.project or not ready:
             self.auto_button.setChecked(False)
-            self.notice.setText('프로젝트와 스트림 연결을 먼저 준비하세요.')
+            self.notice.setText('프로젝트를 열고 스트림 연결 또는 동영상 재생을 먼저 준비하세요.')
             return
         self.policy.automatic = self.auto_button.isChecked()
         self.policy.last_save = None
         self.notice.setText('자동 촬영 중 · 새 프레임만 저장합니다.' if self.policy.automatic else '자동 촬영 중지')
+        self.setFocus()
+
+    def show_interval(self, seconds):
+        self.interval_text.setText(f'초마다 1장 (분당 {60 / seconds:.0f}장)')
+        for preset, chip in self.preset_buttons.items():
+            chip.setChecked(abs(preset - seconds) < 1e-9)
+
+    def set_interval_preset(self, seconds):
+        self.interval.setValue(seconds)
+        self.show_interval(self.interval.value())      # re-check the chip even when the value did not change
         self.setFocus()
 
     def saved_text(self, image):
@@ -246,6 +426,13 @@ class CapturePage(QtWidgets.QWidget):
         self.setFocus()
 
     def tick(self):
+        if self.media:
+            playing = self.media.playing
+            self.media.advance()
+            if playing and self.media.ended:
+                self.stop_auto()
+                self.notice.setText('동영상 재생 완료 · 자동 촬영을 중지했습니다.')
+            self.update_playback()
         frame, sequence, received = self.latest()
         if frame is None:
             return
