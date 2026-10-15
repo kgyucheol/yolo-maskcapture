@@ -3,4 +3,5 @@ numpy>=1.23,<3
 opencv-python>=4.5
 pyzmq>=25
 PyYAML>=6
-PySide6>=6.5,<7
+# 6.12.0은 QPainter 메서드를 호출할 때마다 None 참조 수가 줄어 영상을 그리다 "deallocating None"으로 비정상 종료됩니다. 6.11.2에서 정상임을 확인했습니다.
+PySide6>=6.5,<7,!=6.12.0

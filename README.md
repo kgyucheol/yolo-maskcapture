@@ -16,6 +16,8 @@ python app.py
 
 학습 패키지 없이 수집·라벨링·데이터셋 기능만 사용하려면 `python -m pip install -r requirements-ui.txt`를 실행하세요. Qt는 PySide6를 우선 사용하고, 설치되어 있는 PyQt5도 지원합니다. GUI는 학습·추론을 요청하기 전까지 PyTorch/Ultralytics를 불러오지 않습니다.
 
+> **PySide6 6.12.0은 사용하지 마세요.** 이 버전은 `QPainter` 메서드를 호출할 때마다 파이썬 `None`의 참조 수를 줄여서, 영상을 그리는 동안 `Fatal Python error: none_dealloc: deallocating None`으로 프로그램이 종료됩니다(6.11.2, 6.10.3, 6.9.3에서는 발생하지 않음을 확인). `requirements-ui.txt`가 이 버전을 제외합니다. 이미 설치했다면 `python -m pip install "PySide6!=6.12.0"`으로 낮추세요.
+
 프로젝트를 바로 열 수도 있습니다.
 
 ```bash
@@ -29,14 +31,14 @@ conda activate yolo
 python app.py
 ```
 
-현재 설치된 주요 패키지는 **PyTorch `2.11.0+cu128`, torchvision `0.26.0+cu128`, Ultralytics `8.4.60`, PySide6 `6.12.0`**입니다. NumPy·OpenCV·PyZMQ·PyYAML·ONNX·ONNX Runtime·pytest와 하위 의존성도 설치되어 있습니다. 인터넷과 GPU 접근을 확인했고, RTX 5070 Laptop GPU에서 CUDA 행렬 연산·torchvision NMS 및 실제 `yolo11s-seg.pt`의 848×480 예제 이미지 추론(마스크 객체 6개)을 확인했습니다. 학습과 추론 설정의 device를 `0`으로 선택하면 GPU를 사용합니다.
+현재 설치된 주요 패키지는 **PyTorch `2.11.0+cu128`, torchvision `0.26.0+cu128`, Ultralytics `8.4.60`, PySide6 `6.11.2`**입니다. NumPy·OpenCV·PyZMQ·PyYAML·ONNX·ONNX Runtime·pytest와 하위 의존성도 설치되어 있습니다. 인터넷과 GPU 접근을 확인했고, RTX 5070 Laptop GPU에서 CUDA 행렬 연산·torchvision NMS 및 실제 `yolo11s-seg.pt`의 848×480 예제 이미지 추론(마스크 객체 6개)을 확인했습니다. 학습과 추론 설정의 device를 `0`으로 선택하면 GPU를 사용합니다.
 
 환경 이동 후 테스트 43개와 `pip check`도 통과했습니다. 설치 상태와 버전은 `/home/nse/miniconda3/envs/yolo/environment-status.json`, `/home/nse/miniconda3/envs/yolo/installed-packages.txt`, GPU 확인 결과는 `/home/nse/miniconda3/envs/yolo/gpu-verification.json`에 기록했습니다. 새 환경을 만들 때는 `environment.yml`, GPU 패키지를 설치할 때는 `requirements-gpu.txt`를 사용할 수 있습니다. [PyTorch 공식 CUDA 12.8 조합](https://pytorch.org/get-started/previous-versions/)을 따릅니다.
 
 ## 사용 순서
 
 1. **새 프로젝트**에서 비어 있는 폴더를 선택하세요. 기존 프로젝트는 `project.json`으로 엽니다.
-2. **데이터 수집**에서 기본 주소 `192.168.123.164:55555`에 연결합니다. SUB/PULL/REQ와 bind/connect를 선택할 수 있습니다. 버튼/Space로 한 장 촬영하거나 N초 간격 자동 촬영을 시작하세요. 유효한 새 프레임이 없으면 자동 촬영하지 않습니다.
+2. **데이터 수집**에서 기본 주소 `192.168.123.164:55555`에 연결합니다. SUB/PULL/REQ와 bind/connect를 선택할 수 있습니다. 프로젝트 없이도 연결해서 영상을 볼 수 있습니다(촬영은 프로젝트가 필요합니다). 버튼/Space로 한 장 촬영하거나 N초 간격 자동 촬영을 시작하세요. 저장하면 영상 아래에 파일 이름이 1초 동안 표시됩니다. 유효한 새 프레임이 없으면 자동 촬영하지 않습니다.
 3. **마스크 라벨링**에서 클래스 태그 이름을 등록합니다. 원본 이미지 가져오기도 가능합니다. 마스크를 그린 뒤 F로 도형을 완료하고 숫자로 태그를 지정하세요. 예: `1 컵 / 2 병 / 3 상자`에서 숫자 2를 누르면 선택 객체가 병이 됩니다. 기존 객체도 선택 후 숫자로 변경할 수 있습니다.
 4. 변경은 잠시 후 또는 이미지 이동 전에 자동 저장됩니다. 미완성 도형은 F로 완료하거나 C로 취소해야 이동할 수 있습니다. 객체가 없는 이미지만 **배경 이미지로 확인**을 체크하세요.
 5. **데이터셋**에서 검증 비율/seed를 정하고 생성합니다. 미작업·태그 미지정 이미지는 제외됩니다. 최소 두 장의 완료 이미지가 필요합니다. 매번 별도 스냅샷을 만들며 원본과 이전 결과를 보존합니다.
@@ -109,6 +111,6 @@ QT_QPA_PLATFORM=offscreen PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
 
 실제 ZMQ 송신기 접속, 데이터셋 학습과 ONNX 모델 실행은 별도 실기 검증이 필요합니다. 사전 학습된 YOLO11s-seg의 앱 PT 추론은 RTX 5070 GPU에서 확인했습니다. Qt5 offscreen으로 캔버스·전체 창, 저장/복원과 데이터셋 생성, 모델/작업 오류 처리를 검사합니다. ZMQ 소켓 테스트는 pyzmq 부재로 외부 전송 계층을 대체하며 이미지 디코딩은 실제 OpenCV를 사용합니다.
 
-현재 자동 테스트는 PySide6에서 통과한 43개이며, 데이터셋 작업 스레드에서 학습 화면으로 결과를 전달하는 과정과 별도 학습 프로세스의 실패 처리도 검사합니다. 새 가상환경에서 테스트하려면 `python -m pip install pytest`도 실행하세요.
+현재 자동 테스트는 PySide6에서 통과한 48개이며, 데이터셋 작업 스레드에서 학습 화면으로 결과를 전달하는 과정과 별도 학습 프로세스의 실패 처리도 검사합니다. 새 가상환경에서 테스트하려면 `python -m pip install pytest`도 실행하세요.
 
 API 동작 참고: [Ultralytics 학습](https://docs.ultralytics.com/modes/train), [세그먼테이션](https://docs.ultralytics.com/tasks/segment), [예측](https://docs.ultralytics.com/modes/predict).
