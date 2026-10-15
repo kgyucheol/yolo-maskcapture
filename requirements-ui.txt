@@ -1,0 +1,6 @@
+# 수집 / 라벨링 / 데이터셋 생성. Python 3.10 이상.
+numpy>=1.23,<3
+opencv-python>=4.5
+pyzmq>=25
+PyYAML>=6
+PySide6>=6.5,<7

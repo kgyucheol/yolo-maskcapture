@@ -1,0 +1,14 @@
+.venv/
+yolo/
+.conda-envs/
+.conda-pkgs/
+__pycache__/
+.pytest_cache/
+*.pyc
+data/
+runs/
+projects/
+*.pt
+*.onnx
+install.log
+*.orig

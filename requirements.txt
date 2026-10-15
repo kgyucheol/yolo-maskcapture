@@ -1,0 +1,4 @@
+-r requirements-ui.txt
+ultralytics>=8.3,<9
+onnx>=1.16
+onnxruntime>=1.18   # GPU 추론은 onnxruntime-gpu로 교체

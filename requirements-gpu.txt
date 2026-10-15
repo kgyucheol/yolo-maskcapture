@@ -1,0 +1,6 @@
+# CUDA 12.8 builds from the official PyTorch wheel index.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+ultralytics==8.4.60
+-r requirements.txt
