@@ -51,6 +51,36 @@ def page_header(title, description):
     return box
 
 
+class Toast(QtWidgets.QLabel):
+    """영상 위에 잠깐 떠서 결과를 알리는 알림. 새 메시지는 내용을 바꾸고 표시 시간을 다시 센다."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setObjectName('toast')
+        self.setAlignment(Qt.AlignCenter)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.timer = QtCore.QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.hide)
+        self.hide()
+
+    def flash(self, text, ms=1000, error=False):
+        self.setProperty('error', bool(error))
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.setText(text)
+        self.adjustSize()
+        self.place()
+        self.show()
+        self.raise_()
+        self.timer.start(ms)
+
+    def place(self):
+        parent = self.parentWidget()
+        if parent is not None:
+            self.move(max(0, (parent.width() - self.width()) // 2), max(0, parent.height() - self.height() - 28))
+
+
 class ImageView(QtWidgets.QWidget):
     def __init__(self, empty='영상 또는 이미지를 선택하세요', parent=None):
         super().__init__(parent)
@@ -58,6 +88,14 @@ class ImageView(QtWidgets.QWidget):
         self.empty = empty
         self.setMinimumSize(320, 220)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.toast = Toast(self)
+
+    def flash(self, text, ms=1000, error=False):
+        self.toast.flash(text, ms, error)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.toast.place()
 
     def set_frame(self, frame):
         self.frame = qimage(frame) if frame is not None else None

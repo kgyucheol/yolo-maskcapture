@@ -221,6 +221,9 @@ class CapturePage(QtWidgets.QWidget):
         self.notice.setText('자동 촬영 중 · 새 프레임만 저장합니다.' if self.policy.automatic else '자동 촬영 중지')
         self.setFocus()
 
+    def saved_text(self, image):
+        return f'✓ 저장됨 · 이번 세션 {self.policy.saved}장\n{image}'
+
     def update_count(self):
         total = len(self.project.images) if self.project else 0
         self.count.setText(f'이번 세션 {self.policy.saved}장   ·   전체 {total}장')
@@ -228,15 +231,18 @@ class CapturePage(QtWidgets.QWidget):
     def capture_one(self):
         if not self.project:
             self.notice.setText('촬영하려면 프로젝트를 만들거나 여세요.')
+            self.view.flash('촬영하려면 프로젝트를 만들거나 여세요.', error=True)
             return
         frame, sequence, received = self.latest()
         try:
             image = self.policy.save(self.project, frame, sequence, received, time.monotonic())
             self.notice.setText(f'저장됨 · {image}')
+            self.view.flash(self.saved_text(image))
             self.update_count()
             self.imagesAdded.emit()
         except (ValueError, OSError) as exc:
             self.notice.setText(str(exc))
+            self.view.flash(str(exc), error=True)
         self.setFocus()
 
     def tick(self):
@@ -247,7 +253,9 @@ class CapturePage(QtWidgets.QWidget):
             self.view.set_frame(frame)
             self.displayed_sequence = sequence
         try:
-            if self.project and self.policy.maybe_save(self.project, frame, sequence, received, time.monotonic()):
+            image = self.project and self.policy.maybe_save(self.project, frame, sequence, received, time.monotonic())
+            if image:
+                self.view.flash(self.saved_text(image))
                 self.update_count()
                 self.imagesAdded.emit()
         except (ValueError, OSError) as exc:

@@ -17,6 +17,8 @@ QLabel#title { font-size: 25px; font-weight: 700; }
 QLabel#subtitle { color: #97a6bd; font-size: 12px; }
 QLabel#section { font-size: 14px; font-weight: 700; color: #e0e8f6; }
 QLabel#badge { color: #59d7bd; background: #153a38; border-radius: 7px; padding: 5px 10px; }
+QLabel#toast { color: #8ef3d9; background: #153a38; border: 1px solid #3e9d8b; border-radius: 9px; padding: 10px 18px; font-weight: 700; }
+QLabel#toast[error="true"] { color: #ffb3b3; background: #3a1b22; border-color: #8a3d4a; }
 QLabel#notice { color: #abbad0; padding: 9px; background: #172232; border-radius: 7px; }
 QPushButton { background: #202c3e; border: 1px solid #334158; border-radius: 7px; padding: 9px 13px; font-weight: 600; }
 QPushButton:hover { background: #293b51; border-color: #5c7a96; }
